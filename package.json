@@ -1,0 +1,42 @@
+{
+    "name": "whatsapp-engine",
+    "version": "4.4.0",
+    "description": "Baileys",
+    "main": "index.js",
+    "scripts": {
+        "start": "npx kill-port 4000 && ts-node index.ts",
+        "pm2": "NODE_ENV=production pm2 start index.ts --watch",
+        "dev": "npx kill-port 4000 && nodemon index.ts"
+    },
+    "keywords": [
+        "wa",
+        "baileys"
+    ],
+    "author": "baguspras",
+    "license": "MIT",
+    "dependencies": {
+        "@adiwajshing/baileys": "^4.4.0",
+        "dateformat": "^5.0.3",
+        "express": "^4.17.2",
+        "html-to-text": "^9.0.3",
+        "http": "^0.0.1-security",
+        "kill-port": "^2.0.1",
+        "mysql": "^2.18.1",
+        "node-cron": "^3.0.2",
+        "node-device-detector": "^2.0.12",
+        "pino": "^8.11.0",
+        "qrcode": "^1.5.0",
+        "qrcode-terminal": "^0.12.0",
+        "socket.io": "^4.5.3",
+        "transports": "^1.2.2",
+        "websocket": "^1.0.34"
+    },
+    "devDependencies": {
+        "@types/node": "^18.11.7",
+        "javascript-obfuscator": "^0.6.2",
+        "node-dev": "^7.4.3",
+        "nodemon": "^2.0.20",
+        "ts-node": "^10.9.1",
+        "tslib": "^2.4.0"
+    }
+}

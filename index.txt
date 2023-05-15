@@ -1,0 +1,376 @@
+import { Boom } from "@hapi/boom";
+// import * as dateFormat from "dateformat";
+import {unlink,existsSync,writeFileSync,readFileSync,writeFile} from "fs";
+import * as express from "express";
+import * as http from "http";
+import * as qrcode from "qrcode";
+import { Server } from "socket.io";
+import * as path from "path";
+import * as mysql from "mysql";
+import * as cron from "node-cron";
+import makeWASocket, { DisconnectReason, useSingleFileAuthState, downloadMediaMessage } from "@adiwajshing/baileys";
+const { compile } = require('html-to-text');
+
+const config = require("./config/database.json");
+
+var db_config = {
+    host: config.hostdb,
+    user: config.userdb,
+    port: config.portdb,
+    password: config.passdb,
+    database: config.dbname,
+    charset: "utf8mb4"
+};
+var connection;
+
+function dbDisconnect() {
+    connection = mysql.createConnection(db_config);
+
+    connection.connect(function(err) {
+        if (err) {
+            console.log("error when connecting to db:", err);
+            setTimeout(dbDisconnect, 2000);
+        }else{
+            console.log('db connect')
+        }
+    });
+
+    connection.on("error", function(err) {
+        console.log("db error", err);
+        if (err.code === "PROTOCOL_CONNECTION_LOST") {
+            dbDisconnect();
+        } else {
+            throw err;
+        }
+    });
+}
+
+dbDisconnect();
+
+const useStore = !process.argv.includes("--no-store");
+const doReplies = !process.argv.includes("--no-reply");
+
+const port = config.port;
+const local = config.local;
+const app = express();
+const server = http.createServer(app);
+// const io = new Server(server);
+const io = new Server(server, {
+    cors: {
+      origin: '*',
+      allowedHeaders: ["Access-Control-Allow-Origin: *"],
+      credentials: true
+    }
+});
+
+var sock = {};
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use("/assets", express.static(path.join(__dirname, "/assets/")));
+
+const sessions = [];
+const SESSIONS_FILE = "./sessions/whatsapp-id.json";
+
+const createSessionsFileIfNotExists = function() {
+    if (!existsSync(SESSIONS_FILE)) {
+        try {
+            writeFileSync(SESSIONS_FILE, JSON.stringify([]));
+            console.log("Sessions file created successfully");
+        } catch (err) {
+            console.log("Failed to create sessions file: ", err);
+        }
+    }
+};
+createSessionsFileIfNotExists();
+
+const getSessionsFile = function() {
+    try {
+        return JSON.parse(readFileSync(SESSIONS_FILE).toString());
+    } catch (error) {
+        return [];
+    }
+};
+
+const setSessionsFile = function(sessions) {
+    writeFile(SESSIONS_FILE, JSON.stringify(sessions), function(err) {
+        if (err) { // console.log(err)
+        }
+    });
+};
+
+const startSock = async(id: string) => {
+    try { // console.log(`ObjectID: ${id}`)
+
+        const { state, saveState } = useSingleFileAuthState(`./sessions/session-${id}.json`);
+        sock[id] = makeWASocket({
+            connectTimeoutMs: 10000,
+            defaultQueryTimeoutMs: 10000000,
+            keepAliveIntervalMs: 10000000,
+            printQRInTerminal: true,
+            browser: [
+                // id, "Safari", "1.0.0"
+                "tabungan surga", "Safari", "1.0.0"
+            ],
+            syncFullHistory: true,
+            auth: state
+        });
+        sock[id].ev.on("connection.update", async(data) => {
+            try {
+                const { connection, lastDisconnect, qr } = data;
+                if (qr) {
+                    qrcode.toDataURL(qr, (err, url) => {
+                        io.emit("qr", {
+                            id: id,
+                            src: url
+                        });
+                    });
+                }
+                if (connection === "close") { // console.log(`connection: close`)
+                    if ((lastDisconnect.error as Boom) ?.output ?.statusCode !== DisconnectReason.loggedOut) { // console.log('run close not logout')
+                        setTimeout(() => {
+                            try {
+                                startSock(id);
+                            } catch (error) {}
+                        }, 15000);
+                    } else {
+                        if (existsSync(`./sessions/session-${id}.json`)) {
+                            unlink(`./sessions/session-${id}.json`, (err) => {
+                                if (err)
+                                    throw err;
+
+
+                                // console.log(`successfully deleted session ${id}`)
+                                const savedSessions = getSessionsFile();
+                                const sessionIndex = savedSessions.findIndex((e) => e.id == id);
+                                savedSessions.splice(sessionIndex, 1);
+                                setSessionsFile(savedSessions);
+                            });
+                        }
+                    }
+                } else if (connection === "open") { 
+                    // console.log(`connection: open`)
+                    var no = state.creds.me.id.split(':');
+                    console.log(state);
+                    io.emit("name", {
+                        id: id,
+                        name:state.creds.me.name,
+                        nomor:no[0],
+                        status: "open"
+                    });
+                }
+            } catch (error) {}
+        });
+
+        sock[id].ev.on("messages.upsert", async(data) => {
+            if (data.type === "notify") {
+                for (const msg of data.messages) {
+                    if (!msg.message)
+                        return;
+                    const messageType = Object.keys(msg.message)[0];
+                    if (!msg.key.fromMe && doReplies) {} else {}
+                }
+            }
+        });
+
+        sock[id].ev.on("creds.update", saveState);
+        const savedSessions = getSessionsFile();
+        const sessionIndex = savedSessions.findIndex((sess) => sess.id == id);
+
+        if (sessionIndex == -1) {
+            savedSessions.push({ id: id });
+            setSessionsFile(savedSessions);
+        }
+        return false;
+    } catch (error) {
+        console.log("error: startSock");
+        console.log(error);
+    }
+};
+
+const init = async(socket ? ) => {
+    const savedSessions = getSessionsFile();
+    // console.log('run init')
+    savedSessions.forEach((e) => {
+        try { // console.log(`init :${e.id}`)
+            startSock(e.id);
+        } catch (error) {}
+    });
+};
+init();
+
+io.on("connection", function(socket) {
+    init(socket);
+    socket.on("create-session", function(data) {
+        if (data.id) {
+            try {
+                // console.log("io connection: " + data.id);
+                startSock(data.id);
+            } catch (error) {}
+        }
+    });
+});
+
+app.get("/", (req, res) => {
+    res.header("Access-Control-Expose-Headers", "Access-Control-*")
+    res.header("Access-Control-Allow-Headers", "Access-Control-*, Origin, X-Requested-With, Content-Type, Accept")
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD')
+    res.header('Access-Control-Allow-Origin', '*')
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Allow', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
+    res.sendFile("views/index.html", { root: __dirname });
+});
+
+app.post("/send-message", async(req, res) => {
+    const sender = req.body.sender;
+    const nomor = req.body.nomor;
+    const message = req.body.message;
+    const number = `${nomor}@s.whatsapp.net`;
+    var timeout = 200;
+ 
+    setTimeout(async() => {
+        try {
+            const sendMessage = await sock[sender].sendMessage(number, { text: message });
+            timeout = 200;
+            res.status(200).json({ status: true, response: sendMessage });
+        } catch (error) {
+            timeout = 1000;
+            res.status(500).json({ status: false, response: error });
+        }
+    }, timeout);
+});
+
+cron.schedule('*/10 * * * * *', () => {
+    // dbDisconnect()
+    token()
+    broadcast()
+    nonAktif()
+    broadcastAdmin()
+
+});
+
+const token = function() {
+    connection.query("SELECT 1 as aktif", (err, rows) => {
+        if (err) {
+            console.log("Check Connection..");
+        } else {
+            connection.query("SELECT kode_whatsapp as sender FROM tb_whatsapp", (err, row) => {
+                if (!err) {
+                    connection.query("SELECT t.kd_user,t.token,b.nomor_whatsapp as whatsapp FROM tb_token t JOIN tb_biodata b ON (t.kd_user=b.kd_biodata) WHERE t.status='0' limit 1", async(err, rows,res) => {
+                        if (err) {
+                            console.log("Check Query..");
+                        } else {
+                            var rowsData = rows.length;
+                            console.log(row);
+                            return
+                            if(rowsData !=0){
+                                console.log('cron token')
+                                const sender = 999;
+                                for (let index = 0; index < rows.length; index++) {
+                                    const msg = "*Tabungan Surga* \r\n\r\n\ Kode *OTP* : *"+rows[index].token+"* \r\n\Jangan berikan kode OTP anda kepada orang lain.";
+                                    let sendMes =   sock[sender].sendMessage(rows[index].whatsapp+'@s.whatsapp.net', { text: msg });
+                                    let value = await sendMes;
+                                    console.log(value.status)
+                                    if (value.status == 1) {
+                                        connection.query("UPDATE `tb_token` SET `status` = '1' WHERE `tb_token`.`kd_user` = '"+rows[index].kd_user+"' LIMIT 1");
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+        }
+    });
+}
+
+const broadcast = function() {
+    const convert = compile({
+        wordwrap: 1000
+      });
+      
+    connection.query("SELECT lb.kd_list_broadcast, b.kode_whatsapp as sender, b.pesan,b.waktu, lb.nomor,time(now()), time(b.waktu ) + INTERVAL 10 MINUTE AS sekarang  FROM `tb_broadcast` b , tb_list_broadcast lb WHERE lb.kd_broadcast = b.kd_broadcast AND lb.status = 0 AND date(b.waktu) = date(now()) AND b.pengirim != '1'", async(err, rows) => {
+    if (!err) {
+        var rowsData = rows.length;
+        if(rowsData !=0){
+        console.log('cron broadcast')
+            var sender = [];
+            for (let index = 0; index < rows.length; index++) {
+                sender[index] = rows[index].sender;
+                let sendMes = sock[sender[index]].sendMessage(rows[index].nomor+'@s.whatsapp.net', { text: convert(rows[index].pesan) });
+                let value = await sendMes;
+                console.log(value.status)
+                if (value.status == 1) {
+                    connection.query("UPDATE `tb_list_broadcast` SET `status` = '1' WHERE `tb_list_broadcast`.`kd_list_broadcast` = '"+rows[index].kd_list_broadcast+"'");
+
+                    // connection.query("UPDATE `tb_token` SET `status` = '1' WHERE `tb_token`.`kd_user` = '"+rows[index].kd_user+"' LIMIT 1");
+                }
+            }
+        }
+    }
+});
+}
+
+function makeid(length) {
+    var result           = "";
+    var characters       = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    var charactersLength = characters.length;
+    for ( var i = 0; i < length; i++ ) {
+       result += characters.charAt(Math.floor(Math.random() * charactersLength));
+    }
+    return result;
+ }
+const broadcastAdmin = function() {
+    var now = new Date();
+    const convert = compile({
+        wordwrap: 1000
+      });
+      
+    connection.query("SELECT lb.kd_list_broadcast,b.kd_broadcast, b.kode_whatsapp as sender, b.pesan,concat(date(b.waktu),' ',time(b.waktu)) as waktu,b.judul, lb.nomor,time(now()), time(b.waktu ) + INTERVAL 10 MINUTE AS sekarang FROM `tb_broadcast` b , tb_list_broadcast lb WHERE lb.kd_broadcast = b.kd_broadcast AND lb.status = 0 AND date(b.waktu) = date(now()) AND b.pengirim = '1'", async(err, rows) => {
+    if (!err) {
+        var rowsData = rows.length;
+        if(rowsData !=0){
+            var sender = [];
+            var waktu = [];
+            let kd_broadcast;
+            let judul;
+            let waktuLog;
+            for (let index = 0; index < rows.length; index++) {
+            sender[index] = rows[index].sender;
+            waktu[index] = rows[index].waktu;
+            kd_broadcast = rows[index].kd_broadcast;
+            judul = rows[index].judul;
+            waktuLog = rows[index].waktu;
+
+                let sendMes =  sock[sender[index]].sendMessage(rows[index].nomor+'@s.whatsapp.net', { text: convert(rows[index].pesan) });
+                let value = await sendMes;
+                console.log(value.status)
+                if (value.status == 1) {
+                    connection.query("UPDATE `tb_list_broadcast` SET `status` = '1' WHERE `tb_list_broadcast`.`kd_list_broadcast` = '"+rows[index].kd_list_broadcast+"'");
+                }
+            }
+            connection.query("INSERT INTO `tb_log_broadcast`(`kd_log_broadcast`, `judul`, `status`, `dibuat`,`kd_broadcast`) VALUES ('"+makeid(20)+"','"+judul+"','sukses','"+waktuLog+"','"+kd_broadcast+"')");
+        }
+    }
+});
+}
+const nonAktif  = function() {
+ 
+    connection.query("SELECT * FROM `tb_program` WHERE waktu_akhir_program < date(now())", (err, rows) => {
+    if (!err) {
+            var rowsData = rows.length;
+            if(rowsData !=0){
+                for (let index = 0; index < rows.length; index++) {
+                    connection.query("UPDATE `tb_program` SET `status` = 'success' ,  `status_active` = '0' WHERE `tb_program`.`kd_program` = '"+rows[index].kd_program+"' AND status = 'pending'");
+                }
+            }
+        }
+    });
+}
+
+
+server.listen(port, function() { 
+    console.log(`${local}:${port}/?id=999&as=tabungansurga`)
+});
+
+server.timeout = 99999999;
