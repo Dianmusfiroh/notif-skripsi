@@ -1,6 +1,6 @@
 import { Boom } from "@hapi/boom";
 // import * as dateFormat from "dateformat";
-import {unlink,existsSync,writeFileSync,readFileSync,writeFile} from "fs";
+import { unlink, existsSync, writeFileSync, readFileSync, writeFile,readdirSync,lstatSync,unlinkSync,rmdirSync } from "fs";
 import * as express from "express";
 import * as http from "http";
 import * as qrcode from "qrcode";
@@ -9,17 +9,27 @@ import { pino } from "pino";
 import * as path from "path";
 import * as mysql from "mysql";
 import * as cron from "node-cron";
-import makeWASocket, { DisconnectReason, useSingleFileAuthState, downloadMediaMessage } from "@adiwajshing/baileys";
+import MAIN_LOGGER from './src/Utils/logger';
+
+import makeWASocket, { DisconnectReason, useMultiFileAuthState, downloadMediaMessage } from "@whiskeysockets/baileys";
 const { compile } = require('html-to-text');
 
 const useStore = !process.argv.includes("--no-store");
 const doReplies = !process.argv.includes("--no-reply");
-
+const { v4: uuidv4 } = require('uuid');
+const logger = MAIN_LOGGER.child({})
+logger.level = 'trace'
 const port = '3000';
 const local = 'http://localhost';
 const app = express();
 const server = http.createServer(app);
 // const io = new Server(server);
+const connection = mysql.createConnection({
+    host: 'localhost',
+    user: 'root',
+    password: '',
+    database: 'db_skripsi'
+});
 const io = new Server(server, {
     cors: {
       origin: '*',
@@ -66,22 +76,38 @@ const setSessionsFile = function(sessions) {
         }
     });
 };
-
+const deleteFolderRecursive = function (directoryPath) {
+  if (existsSync(directoryPath)) {
+      readdirSync(directoryPath).forEach((file, index) => {
+        const curPath = path.join(directoryPath, file);
+        if (lstatSync(curPath).isDirectory()) {
+         // recurse
+          deleteFolderRecursive(curPath);
+        } else {
+          // delete file
+          unlinkSync(curPath);
+        }
+      });
+      rmdirSync(directoryPath);
+    }
+  };
 const startSock = async(id: string) => {
-    try { // console.log(`ObjectID: ${id}`)
+    try {// console.log(`ObjectID: ${id}`)
 
-        const { state, saveState } = useSingleFileAuthState(`./sessions/session-${id}.json`);
+        const { state, saveCreds } = await useMultiFileAuthState(`./sessions/${id}`);
         sock[id] = makeWASocket({
             connectTimeoutMs: 10000,
             defaultQueryTimeoutMs: 10000000,
             keepAliveIntervalMs: 10000000,
             printQRInTerminal: false,
-            logger: pino({ level: 'silent' }),
+            // logger: pino, /** P for hidden logger log */
+
             browser: [
-                "jannah", "Safari", "1.0.0"
+                "kdt-skripsi", "Safari", "1.0.0"
             ],
             syncFullHistory: true,
-            auth: state
+            auth: state,
+
         });
         sock[id].ev.on("connection.update", async(data) => {
             try {
@@ -100,15 +126,16 @@ const startSock = async(id: string) => {
                             } catch (error) {}
                         }, 200);
                     } else {
-                        if (existsSync(`./sessions/session-${id}.json`)) {
-                            unlink(`./sessions/session-${id}.json`, (err) => {
-                                if (err)
-                                    throw err;
+                        if (existsSync(`./sessions/${id}`)) {
+                            // unlink(`./sessions/${id}`, (err) => {
+                                // if (err)
+                                //     throw err;
+                                deleteFolderRecursive(`./sessions/${id}`);
                                 const savedSessions = getSessionsFile();
                                 const sessionIndex = savedSessions.findIndex((e) => e.id == id);
                                 savedSessions.splice(sessionIndex, 1);
                                 setSessionsFile(savedSessions);
-                            });
+                            // });
                         }
                     }
                 } else if (connection === "open") { 
@@ -132,7 +159,7 @@ const startSock = async(id: string) => {
             }
         });
 
-        sock[id].ev.on("creds.update", saveState);
+        sock[id].ev.on("creds.update", saveCreds);
         const savedSessions = getSessionsFile();
         const sessionIndex = savedSessions.findIndex((sess) => sess.id == id);
 
@@ -157,6 +184,123 @@ const init = async(socket ? ) => {
     });
 };
 init();
+function getTimeFromDatabase(callback) {
+    connection.query('SELECT waktu FROM t_set_alarm WHERE id = 1', (error, results) => {
+      if (error) {
+        console.error('Error fetching schedule time:', error);
+        return;
+      }
+  
+      if (results.length > 0) {
+        const scheduleTime = results[0].waktu;
+        callback(scheduleTime);
+      } else {
+        console.log('No schedule time found.');
+      }
+    });
+}
+function scheduleCronJob(time) {
+    const [hour, minute] = time.split(':');
+    const cronExpression = `${minute} ${hour} * * 1-6`; // Senin hingga sabtu
+  
+    //   cron.schedule('45 06 * * 1-6', () => {
+        cron.schedule(cronExpression, () => {
+        console.log('Running cron job to fetch data and send messages');
+        getDataFromDatabase((tasks) => {
+            tasks.forEach(task => {
+                const logId = uuidv4(); // Generate a UUID
+                const message = `Hello ${task.name}, kamu punya deathline tugas yang harus kamu selesaikan hari ini!`;
+         
+               
+                const query2 = `INSERT INTO t_broadcast (kd_list_broadcast, nomor,pesan, status) VALUES ('${logId}','${task.no_hp}','${message}', '0');`;
+                connection.query(query2, (error, results) => {
+                    if (error) {
+                        console.error('Error fetching data:', error);
+                        return;
+                    }
+                  
+                    return results;
+                });
+              
+            });
+        });
+    });
+    console.log(`Scheduled task to run at ${cronExpression} ${time} every weekday`);
+}
+  
+getTimeFromDatabase((scheduleTime) => {
+    if (scheduleTime) {
+    scheduleCronJob(scheduleTime);
+    }
+});
+function getDataFromDatabase(callback) {
+
+    const query = `
+        SELECT t.*, a.* 
+        FROM t_tugas t, t_anggota a 
+        WHERE t.id_anggota = a.id 
+          AND t.target_akhir <= DATE(NOW()) 
+          AND t.status_progres != 'selesai';
+    `;
+    connection.query(query, (error, results) => {
+        if (error) {
+            console.error('Error fetching data:', error);
+            return;
+        }
+      
+        callback(results);
+    });
+   
+}
+
+const fetchData = async () => {
+    // Simulasi tugas asinkron (misalnya mengambil data dari API)
+    return new Promise((resolve, reject) => {
+        setTimeout(() => {
+            const data = { message: 'Data berhasil diambil!' };
+            resolve(data); // Kembali dengan data
+        }, 2000); // Simulasi waktu pemrosesan 2 detik
+    });
+};
+
+    cron.schedule('*/15 * * * * *', async () => {
+        connection.query('SELECT * FROM t_broadcast WHERE status = "0" LIMIT 1;', (error, results) => {
+            if (error) {
+                console.error('Error fetching data:', error);
+                return;
+            }
+            console.log('send log');
+            const sender = 999;
+            var timeout = 200;
+            if (results.length != 0) {
+                
+                const number = results[0].nomor; 
+                const kd_list_broadcast = results[0].kd_list_broadcast;
+                console.log('Sending message to', number, 'with message', results[0].pesan);
+                const chatId = `${number}@s.whatsapp.net`;
+                setTimeout(async() => {
+                    try {
+                        const sendMessage = await sock[sender].sendMessage(chatId, { text: results[0].pesan });
+                        console.log(sendMessage)
+                        connection.query("UPDATE `t_broadcast` SET `status` = '1' WHERE `t_broadcast`.`kd_list_broadcast` = '"+kd_list_broadcast+"'", (error, results) => {
+                            if (error) {
+                                console.error('Error fetching data:', error);
+                                return;
+                            }
+                        }, timeout);
+                        console.log('Message sent sukses to',results[0].kd_list_broadcast);
+                        const result = await fetchData();
+                        console.log('Respons dari cron:', result);
+                    } catch (error) {
+                        timeout = 1000;
+                        console.log('Message sent errror to',number);
+                        console.error('Terjadi kesalahan:', error);
+                    }
+                }, timeout);
+                return results;
+            }
+        });
+    });
 
 app.get("/", (req, res) => {
     res.json('oke');
@@ -168,10 +312,12 @@ app.post("/send-message", async(req, res) => {
     const message = req.body.message;
     const number = `${nomor}@s.whatsapp.net`;
     var timeout = 200;
+    // console.log(number, message)
     setTimeout(async() => {
         try {
             const sendMessage = await sock[sender].sendMessage(number, { text: message });
             timeout = 200;
+            console.log(sendMessage)
             res.status(200).json({ status: true, response: sendMessage });
         } catch (error) {
             timeout = 1000;
@@ -184,24 +330,28 @@ app.get("/session", async(req, res) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
 
-    const id = req.query.perangkat;
+    const id = '999';
+    // const id = req.query.perangkat;
 
     var timeout = 200;
     setTimeout(async() => {
         try {
-            const { state, saveState } = useSingleFileAuthState(`./sessions/session-${id}.json`);
+            const { state, saveCreds } = await useMultiFileAuthState(`./sessions/${id}`);
             sock[id] = makeWASocket({
                 connectTimeoutMs: 10000,
                 defaultQueryTimeoutMs: 10000000,
                 keepAliveIntervalMs: 10000000,
                 printQRInTerminal: true,
-                logger: pino({ level: 'silent' }),
+                // logger,
+                // logger: pino({ level: 'silent' }),
                 browser: [
-                    "jannah", "Safari", "1.0.0"
+                    "manajement-klikdigital", "Safari", "1.0.0"
                 ],
                 syncFullHistory: true,
                 auth: state
+           
             });
+
             sock[id].ev.on("connection.update", async(data) => {
                 try {
                     const { connection, lastDisconnect, qr } = data;
@@ -212,7 +362,7 @@ app.get("/session", async(req, res) => {
                             QRCODE[id] = url
                         });
                     }
-                    if (connection === "close") { 
+                if (connection === "close") { 
                         if ((lastDisconnect.error as Boom) ?.output ?.statusCode !== DisconnectReason.loggedOut) { 
                             setTimeout(() => {
                                 try {
@@ -220,15 +370,16 @@ app.get("/session", async(req, res) => {
                                 } catch (error) {}
                             }, 200);
                         } else {
-                            if (existsSync(`./sessions/session-${id}.json`)) {
-                                unlink(`./sessions/session-${id}.json`, (err) => {
-                                    if (err)
-                                        throw err;
+                            if (existsSync(`./sessions/${id}`)) {
+                                // unlink(`./sessions/${id}`, (err) => {
+                                //     if (err)
+                                //         throw err;
+                                    deleteFolderRecursive(`./sessions/${id}`);
                                     const savedSessions = getSessionsFile();
                                     const sessionIndex = savedSessions.findIndex((e) => e.id == id);
                                     savedSessions.splice(sessionIndex, 1);
                                     setSessionsFile(savedSessions);
-                                });
+                                // });
                             }
                         }
                     } else if (connection === "open") { 
@@ -261,7 +412,22 @@ app.get("/session", async(req, res) => {
         }
     }, timeout);
 });
-
+app.get('/logout/',  async(req, res) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+    try {
+        const  id  = 999;
+        deleteFolderRecursive(`./sessions/${id}`);
+        const savedSessions = getSessionsFile();
+        const sessionIndex = savedSessions.findIndex((e) => e.id == id);
+        savedSessions.splice(sessionIndex, 1);
+        setSessionsFile(savedSessions);
+        res.status(200).json({ status: false, response: 'Success' });
+    } catch (error) {
+        res.status(500).json({ status: false, response: error });
+    }
+    
+})
 server.listen(port, function() { 
     console.log(`${local}:${port}`)
 });

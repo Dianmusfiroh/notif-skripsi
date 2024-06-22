@@ -1,6 +1,6 @@
 {
     "name": "whatsapp-engine",
-    "version": "4.4.0",
+    "version": "6.6.0",
     "description": "Baileys",
     "main": "index.js",
     "scripts": {
@@ -12,19 +12,24 @@
         "wa",
         "baileys"
     ],
-    "author": "baguspras",
+    "author": "dianmusfiroh",
     "license": "MIT",
     "dependencies": {
-        "@adiwajshing/baileys": "^4.4.0",
+        "@adiwajshing/eslint-config": "https://github.com/adiwajshing/eslint-config.git",
+        "@adiwajshing/keyed-db": "^0.2.4",
+        "@types/pino": "^7.0.5",
+        "@whiskeysockets/baileys": "^6.6.0",
         "dateformat": "^5.0.3",
         "express": "^4.17.2",
         "html-to-text": "^9.0.3",
         "http": "^0.0.1-security",
         "kill-port": "^2.0.1",
+        "link": "^1.5.1",
         "mysql": "^2.18.1",
         "node-cron": "^3.0.2",
         "node-device-detector": "^2.0.12",
-        "pino": "^8.11.0",
+        "path": "^0.12.7",
+        "pino": "^8.21.0",
         "qrcode": "^1.5.0",
         "qrcode-terminal": "^0.12.0",
         "socket.io": "^4.5.3",
@@ -32,11 +37,11 @@
         "websocket": "^1.0.34"
     },
     "devDependencies": {
-        "@types/node": "^18.11.7",
+        "@types/node": "^18.19.38",
         "javascript-obfuscator": "^0.6.2",
         "node-dev": "^7.4.3",
-        "nodemon": "^2.0.20",
-        "ts-node": "^10.9.1",
-        "tslib": "^2.4.0"
+        "ts-node": "^10.9.2",
+        "tslib": "^2.4.0",
+        "typescript": "^5.5.2"
     }
 }
